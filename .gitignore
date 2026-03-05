@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/frames/*
+data/outputs/*
+data/jobs/*
+data/uploads/*
+data/projects/*
+.vscode/*
+文本对话+文生图+图生图api请求示例.txt

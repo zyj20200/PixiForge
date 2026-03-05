@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PixiForge - 定格动画生成器</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+<div id="app">
+  <!-- ━━━━ 头部 ━━━━ -->
+  <header class="header">
+    <h1>🎬 <span>PixiForge</span></h1>
+    <p class="subtitle">AI 驱动的定格动画自动生成器</p>
+  </header>
+
+  <!-- ━━━━ 步骤条 ━━━━ -->
+  <div class="stepper">
+    <div v-for="step in steps" :key="step.number"
+         class="step"
+         :class="stepClass(step.number)">
+      <div class="step-circle">
+        <template v-if="step.number < currentStep">✓</template>
+        <template v-else>{{ step.number }}</template>
+      </div>
+      <div class="step-label">{{ step.title }}</div>
+    </div>
+  </div>
+
+  <!-- ━━━━ 主内容区 ━━━━ -->
+  <main class="main-content">
+
+    <!-- ──── Step 1: 场景设定 ──── -->
+    <div v-show="currentStep === 1" class="step-content">
+      <h2>📝 场景设定</h2>
+      <p class="step-desc">
+        描述你想制作的定格动画场景，AI 将自动生成逐帧分镜脚本。
+      </p>
+
+      <div class="form-group">
+        <label>场景描述 *</label>
+        <textarea v-model="form.scene_description"
+                  placeholder="例如：一个小人从画面左边走到右边，边走边挥手打招呼"
+                  rows="3"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>角色 / 物品描述</label>
+        <textarea v-model="form.character_description"
+                  placeholder="例如：年轻男性，穿蓝色外套，白色鞋子，卡通风格"
+                  rows="2"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>视觉风格</label>
+        <textarea v-model="form.style_description"
+                  placeholder="例如：黏土定格动画风格，柔和光影，微缩模型质感，浅色背景"
+                  rows="2"></textarea>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>帧率 (FPS)</label>
+          <input type="number" v-model.number="form.fps" min="2" max="24" />
+        </div>
+        <div class="form-group">
+          <label>时长 (秒)</label>
+          <input type="number" v-model.number="form.duration_seconds" min="1" max="30" />
+        </div>
+        <div class="form-group">
+          <label>总帧数</label>
+          <input type="number" :value="frameCount" disabled class="disabled" />
+        </div>
+      </div>
+
+      <div class="info-box">
+        💡 建议：定格动画通常使用 4-8 FPS。帧数越多效果越流畅，但生成时间也越长。
+        每帧约需 5-15 秒，{{ frameCount }} 帧预计需要 {{ Math.ceil(frameCount * 10 / 60) }}-{{ Math.ceil(frameCount * 15 / 60) }} 分钟。
+      </div>
+
+      <div class="actions">
+        <button @click="createAndGenerate"
+                :disabled="loading || !form.scene_description.trim()"
+                class="btn-primary">
+          <span v-if="loading" class="spinner"></span>
+          {{ loading ? 'AI 分镜生成中，请稍候...' : '创建项目并生成分镜 →' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- ──── Step 2: 分镜设计 ──── -->
+    <div v-show="currentStep === 2" class="step-content">
+      <h2>🎬 分镜设计</h2>
+      <p class="step-desc">
+        AI 已生成 {{ editableFrames.length }} 帧分镜。你可以编辑每帧的画面描述和变化提示，也可以增删帧。
+      </p>
+
+      <div v-if="project?.storyboard" class="storyboard-info">
+        <h3>{{ project.storyboard.title }}</h3>
+        <p>{{ project.storyboard.summary }}</p>
+      </div>
+
+      <div class="frames-editor">
+        <div v-for="(frame, idx) in editableFrames" :key="idx" class="frame-card">
+          <div class="frame-header">
+            <span class="frame-number">帧 {{ frame.index }}</span>
+            <button @click="removeFrame(idx)"
+                    class="btn-icon"
+                    title="删除此帧"
+                    :disabled="editableFrames.length <= 2">✕</button>
+          </div>
+          <div class="form-group">
+            <label>画面描述 (description)</label>
+            <textarea v-model="frame.description" rows="2"
+                      placeholder="完整的画面视觉描述（英文效果更好）"></textarea>
+          </div>
+          <div v-if="idx > 0" class="form-group">
+            <label>变化提示 (edit_prompt) — 相对上一帧的微小变化</label>
+            <textarea v-model="frame.edit_prompt" rows="2"
+                      placeholder="例如：move the left arm slightly upward"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button @click="addFrame" class="btn-secondary">+ 添加帧</button>
+        <button @click="regenerateStoryboard" :disabled="loading" class="btn-secondary">
+          <span v-if="loading" class="spinner" style="border-color: var(--text-muted); border-top-color: transparent;"></span>
+          {{ loading ? '重新生成中...' : '🔄 重新生成分镜' }}
+        </button>
+        <button @click="goToStep(1)" class="btn-secondary">← 返回修改场景</button>
+        <button @click="confirmStoryboard" :disabled="loading" class="btn-primary">
+          确认分镜，下一步 →
+        </button>
+      </div>
+    </div>
+
+    <!-- ──── Step 3: 首帧图片 ──── -->
+    <div v-show="currentStep === 3" class="step-content">
+      <h2>🖼️ 首帧图片</h2>
+      <p class="step-desc">
+        生成或上传动画的第一帧图片。后续所有帧都将基于首帧进行微调生成，请确保首帧质量满意。
+      </p>
+
+      <div class="first-frame-options">
+        <!-- 选项A: AI 生成 -->
+        <div class="option-card">
+          <h3>🎨 AI 文生图</h3>
+          <div class="form-group">
+            <label>首帧提示词</label>
+            <textarea v-model="firstFramePrompt" rows="4"
+                      placeholder="描述首帧画面..."></textarea>
+          </div>
+          <button @click="generateFirstFrame" :disabled="loading || !firstFramePrompt.trim()" class="btn-primary" style="width:100%">
+            <span v-if="loading" class="spinner"></span>
+            {{ loading ? '生成中...' : '生成首帧图片' }}
+          </button>
+        </div>
+
+        <!-- 分隔 -->
+        <div class="divider-text">或者</div>
+
+        <!-- 选项B: 上传 -->
+        <div class="option-card">
+          <h3>📁 上传图片</h3>
+          <div class="upload-area"
+               @click="$refs.fileInput.click()"
+               @dragover.prevent
+               @drop.prevent="handleDrop">
+            <p>点击选择或拖拽图片到此处</p>
+            <p style="font-size:12px;margin-top:4px;">支持 JPG / PNG</p>
+            <input type="file" ref="fileInput" accept="image/*"
+                   @change="handleFileSelect" style="display:none" />
+          </div>
+        </div>
+      </div>
+
+      <!-- 首帧预览 -->
+      <div v-if="project?.first_frame_url" class="first-frame-preview">
+        <h3>✅ 首帧预览</h3>
+        <img :src="project.first_frame_url + '?t=' + Date.now()" alt="首帧图片" />
+        <div class="actions" style="justify-content:center">
+          <button @click="goToStep(4)" class="btn-primary">
+            确认首帧，开始生成动画帧 →
+          </button>
+        </div>
+      </div>
+
+      <div class="actions" style="margin-top:16px">
+        <button @click="goToStep(2)" class="btn-secondary">← 返回修改分镜</button>
+      </div>
+    </div>
+
+    <!-- ──── Step 4: 生成动画帧 ──── -->
+    <div v-show="currentStep === 4" class="step-content">
+      <h2>⚡ 生成动画帧</h2>
+      <p class="step-desc">
+        系统将使用图片编辑 AI 逐帧生成动画，每一帧基于上一帧进行微调，确保画面连贯。
+      </p>
+
+      <!-- 开始前 -->
+      <div v-if="project?.status !== 'generating_frames' && project?.status !== 'frames_ready' && !polling">
+        <div class="warning-box">
+          ⚠️ 即将生成 {{ project?.frame_count || 0 }} 帧动画。
+          每帧需要调用一次 AI 图片编辑 API，预计耗时
+          {{ Math.ceil((project?.frame_count || 0) * 10 / 60) }}-{{ Math.ceil((project?.frame_count || 0) * 15 / 60) }} 分钟。
+        </div>
+        <div class="actions">
+          <button @click="startGeneration" :disabled="loading" class="btn-primary">
+            🚀 开始生成
+          </button>
+          <button @click="goToStep(3)" class="btn-secondary">← 返回修改首帧</button>
+        </div>
+      </div>
+
+      <!-- 生成中 -->
+      <div v-if="project?.status === 'generating_frames' || polling">
+        <div class="progress-section">
+          <div class="progress-bar">
+            <div class="progress-fill"
+                 :style="{ width: (project?.generation_progress || 0) + '%' }"></div>
+          </div>
+          <p class="progress-text">
+            {{ project?.generation_message || '准备中...' }}
+            ({{ project?.generation_current || 0 }} / {{ project?.generation_total || 0 }})
+          </p>
+        </div>
+      </div>
+
+      <!-- 帧缩略图 -->
+      <div v-if="(project?.generated_frames || []).length > 0">
+        <h3 style="font-size:15px; margin-bottom:10px;">已生成的帧</h3>
+        <div class="frames-gallery">
+          <div v-for="(url, idx) in project.generated_frames" :key="idx" class="frame-thumb">
+            <img :src="url + '?t=' + Date.now()" :alt="'帧 ' + (idx + 1)" />
+            <span class="frame-thumb-label">{{ idx + 1 }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 完成后 -->
+      <div v-if="project?.status === 'frames_ready'" class="actions" style="margin-top:20px">
+        <button @click="goToStep(5); renderVideo()" class="btn-primary">
+          🎥 渲染视频 →
+        </button>
+        <button @click="startGeneration" class="btn-secondary">🔄 重新生成所有帧</button>
+      </div>
+    </div>
+
+    <!-- ──── Step 5: 视频输出 ──── -->
+    <div v-show="currentStep === 5" class="step-content">
+      <h2>🎥 视频输出</h2>
+
+      <!-- 渲染中 -->
+      <div v-if="loading && !project?.video_url" class="loading-text">
+        <span class="spinner" style="border-color: var(--accent); border-top-color: transparent;"></span>
+        正在渲染视频，请稍候...
+      </div>
+
+      <!-- 视频预览 -->
+      <div v-if="project?.video_url" class="video-preview">
+        <p class="step-desc">🎉 动画生成完成！{{ project.generation_message }}</p>
+
+        <video v-if="project.video_type === 'video/mp4'"
+               :src="project.video_url"
+               controls autoplay loop
+               class="output-video"></video>
+        <img v-else
+             :src="project.video_url"
+             alt="动画 GIF"
+             class="output-video" />
+
+        <div class="actions" style="justify-content:center">
+          <a :href="project.video_url" download class="btn-primary">
+            📥 下载视频
+          </a>
+          <button @click="goToStep(4)" class="btn-secondary">← 返回查看帧</button>
+          <button @click="startOver" class="btn-secondary">🆕 创建新动画</button>
+        </div>
+      </div>
+
+      <!-- 错误 -->
+      <div v-if="!loading && !project?.video_url && project?.status === 'failed'">
+        <p class="step-desc" style="color:var(--danger)">渲染失败：{{ project?.error }}</p>
+        <div class="actions">
+          <button @click="renderVideo" class="btn-primary">🔄 重试渲染</button>
+          <button @click="goToStep(4)" class="btn-secondary">← 返回</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ──── 全局错误 ──── -->
+    <div v-if="error" class="error-banner">
+      <p>{{ error }}</p>
+      <button @click="error = null" class="btn-icon">✕</button>
+    </div>
+  </main>
+
+  <!-- ━━━━ 项目历史 ━━━━ -->
+  <section class="history-section">
+    <button class="history-toggle" @click="showHistory = !showHistory; if(showHistory) fetchProjects()">
+      {{ showHistory ? '▼' : '▶' }} 历史项目 ({{ recentProjects.length }})
+    </button>
+
+    <div v-if="showHistory" class="history-list">
+      <div v-if="recentProjects.length === 0"
+           style="color:var(--text-muted); font-size:13px; padding:8px 0;">
+        暂无项目
+      </div>
+      <div v-for="p in recentProjects" :key="p.id"
+           class="history-item"
+           @click="loadProject(p)">
+        <div class="history-item-info">
+          <div class="history-item-title">
+            {{ p.storyboard?.title || p.scene_description?.slice(0, 30) || p.id }}
+          </div>
+          <div class="history-item-meta">
+            {{ formatTime(p.created_at) }} · {{ p.frame_count }}帧 · {{ p.fps }}FPS
+          </div>
+        </div>
+        <span class="history-item-status" :class="'status-' + p.status">
+          {{ statusLabels[p.status] || p.status }}
+        </span>
+        <button class="history-delete" @click="deleteProject(p.id, $event)" title="删除">🗑</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

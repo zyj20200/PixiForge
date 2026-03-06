@@ -8,4 +8,5 @@ data/jobs/*
 data/uploads/*
 data/projects/*
 .vscode/*
+.claude/*
 文本对话+文生图+图生图api请求示例.txt

@@ -31,6 +31,10 @@ createApp({
 
     // Step 3: 首帧提示词
     const firstFramePrompt = ref("");
+    const selectedCandidateIndex = ref(null);
+
+    // Step 4: 生成模式
+    const generationMode = ref("sequential");
 
     // 步骤定义
     const steps = [
@@ -46,6 +50,7 @@ createApp({
       storyboard_ready: "分镜就绪",
       first_frame_ready: "首帧就绪",
       generating_frames: "生成中",
+      generation_stopped: "已停止",
       frames_ready: "帧就绪",
       rendering: "渲染中",
       completed: "已完成",
@@ -55,6 +60,86 @@ createApp({
     // ━━━━━━━━ 计算属性 ━━━━━━━━
 
     const frameCount = computed(() => form.value.fps * form.value.duration_seconds);
+
+    const runningFrames = computed(() => {
+      const frames = project.value?.generation_running_frames || [];
+      return [...frames].sort((a, b) => a - b);
+    });
+
+    const doneFrameMap = computed(() => {
+      const map = new Map();
+      for (const url of project.value?.generated_frames || []) {
+        const match = url.match(/frame_(\d+)\.jpg/);
+        const frameIndex = match ? Number(match[1]) : null;
+        if (frameIndex) {
+          map.set(frameIndex, url);
+        }
+      }
+      return map;
+    });
+
+    const frameSlots = computed(() => {
+      const total =
+        project.value?.generation_total ||
+        project.value?.frame_count ||
+        project.value?.storyboard?.frames?.length ||
+        0;
+      const doneMap = doneFrameMap.value;
+      const runningSet = new Set(runningFrames.value);
+      const projectStatus = project.value?.status;
+
+      return Array.from({ length: total }, (_, idx) => {
+        const frameIndex = idx + 1;
+        let status = "pending";
+        if (doneMap.has(frameIndex)) {
+          status = "done";
+        } else if (runningSet.has(frameIndex)) {
+          status = "running";
+        } else if (projectStatus === "failed") {
+          status = "failed";
+        } else if (projectStatus === "generation_stopped") {
+          status = "paused";
+        }
+
+        const statusLabelMap = {
+          done: "已完成",
+          running: "生成中",
+          pending: "排队中",
+          paused: "已暂停",
+          failed: "失败",
+        };
+
+        return {
+          index: frameIndex,
+          status,
+          statusLabel: statusLabelMap[status],
+          url: doneMap.get(frameIndex) || null,
+        };
+      });
+    });
+
+    const doneFrameCount = computed(
+      () => frameSlots.value.filter((slot) => slot.status === "done").length
+    );
+
+    const frameStatusSummary = computed(() => {
+      if (!project.value) return "";
+      const parts = [];
+      if (project.value.generation_mode === "parallel") {
+        parts.push(
+          `并发上限 ${project.value.generation_parallel_concurrency || 1}`
+        );
+      }
+      if (runningFrames.value.length > 0) {
+        parts.push(`运行中：帧 ${runningFrames.value.join("、")}`);
+      }
+      return parts.join(" · ");
+    });
+
+    const maxReachedStep = computed(() => {
+      if (!project.value) return 1;
+      return stepForStatus(project.value.status);
+    });
 
     // ━━━━━━━━ API 工具 ━━━━━━━━
 
@@ -68,9 +153,14 @@ createApp({
     // ━━━━━━━━ 步骤导航 ━━━━━━━━
 
     function stepClass(stepNum) {
-      if (stepNum < currentStep.value) return "completed";
+      const reached = maxReachedStep.value;
       if (stepNum === currentStep.value) return "active";
+      if (stepNum <= reached) return "completed";
       return "";
+    }
+
+    function canGoToStep(stepNum) {
+      return stepNum <= maxReachedStep.value;
     }
 
     function goToStep(step) {
@@ -84,6 +174,7 @@ createApp({
         storyboard_ready: 2,
         first_frame_ready: 3,
         generating_frames: 4,
+        generation_stopped: 4,
         frames_ready: 4,
         rendering: 5,
         completed: 5,
@@ -206,6 +297,7 @@ createApp({
       if (!project.value || !firstFramePrompt.value.trim()) return;
       loading.value = true;
       error.value = null;
+      selectedCandidateIndex.value = null;
       try {
         const updated = await api(
           `/api/projects/${project.value.id}/first-frame/generate`,
@@ -213,6 +305,27 @@ createApp({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ prompt: firstFramePrompt.value }),
+          }
+        );
+        project.value = updated;
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        loading.value = false;
+      }
+    }
+
+    async function selectFirstFrame() {
+      if (!project.value || selectedCandidateIndex.value == null) return;
+      loading.value = true;
+      error.value = null;
+      try {
+        const updated = await api(
+          `/api/projects/${project.value.id}/first-frame/select`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ index: selectedCandidateIndex.value }),
           }
         );
         project.value = updated;
@@ -260,7 +373,7 @@ createApp({
       error.value = null;
       try {
         await api(
-          `/api/projects/${project.value.id}/generate-frames`,
+          `/api/projects/${project.value.id}/generate-frames?mode=${generationMode.value}`,
           { method: "POST" }
         );
         startPolling();
@@ -268,6 +381,47 @@ createApp({
         error.value = e.message;
         loading.value = false;
       }
+    }
+
+    async function continueGeneration() {
+      if (!project.value) return;
+      loading.value = true;
+      error.value = null;
+      const mode = project.value.generation_mode || generationMode.value;
+      try {
+        await api(
+          `/api/projects/${project.value.id}/generate-frames?resume=true&mode=${mode}`,
+          { method: "POST" }
+        );
+        startPolling();
+      } catch (e) {
+        error.value = e.message;
+        loading.value = false;
+      }
+    }
+
+    async function stopGeneration() {
+      if (!project.value) return;
+      error.value = null;
+      try {
+        const updated = await api(
+          `/api/projects/${project.value.id}/stop-generation`,
+          { method: "POST" }
+        );
+        project.value = updated;
+        loading.value = true;
+        if (!polling.value) {
+          startPolling();
+        }
+      } catch (e) {
+        error.value = e.message;
+      }
+    }
+
+    function frameThumbSrc(slot) {
+      if (!slot?.url) return "";
+      const version = project.value?.generation_run_id || "static";
+      return `${slot.url}?v=${version}`;
     }
 
     async function startPolling() {
@@ -278,6 +432,11 @@ createApp({
           project.value = p;
 
           if (p.status === "frames_ready") {
+            polling.value = false;
+            loading.value = false;
+            break;
+          }
+          if (p.status === "generation_stopped") {
             polling.value = false;
             loading.value = false;
             break;
@@ -338,6 +497,7 @@ createApp({
       form.value.style_description = proj.style_description || "";
       form.value.fps = proj.fps || 4;
       form.value.duration_seconds = proj.duration_seconds || 3;
+      generationMode.value = proj.generation_mode || "sequential";
 
       if (proj.storyboard) {
         editableFrames.value = JSON.parse(
@@ -393,6 +553,8 @@ createApp({
       };
       editableFrames.value = [];
       firstFramePrompt.value = "";
+      selectedCandidateIndex.value = null;
+      generationMode.value = "sequential";
       error.value = null;
       polling.value = false;
       loading.value = false;
@@ -432,10 +594,19 @@ createApp({
       form,
       editableFrames,
       firstFramePrompt,
+      selectedCandidateIndex,
+      generationMode,
       steps,
       statusLabels,
       frameCount,
+      runningFrames,
+      frameSlots,
+      doneFrameCount,
+      frameStatusSummary,
+      frameThumbSrc,
+      maxReachedStep,
       stepClass,
+      canGoToStep,
       goToStep,
       createAndGenerate,
       regenerateStoryboard,
@@ -443,10 +614,13 @@ createApp({
       addFrame,
       removeFrame,
       generateFirstFrame,
+      selectFirstFrame,
       uploadFirstFrame,
       handleFileSelect,
       handleDrop,
       startGeneration,
+      continueGeneration,
+      stopGeneration,
       renderVideo,
       loadProject,
       deleteProject,

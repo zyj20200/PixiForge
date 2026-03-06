@@ -21,9 +21,11 @@
   <div class="stepper">
     <div v-for="step in steps" :key="step.number"
          class="step"
-         :class="stepClass(step.number)">
+         :class="[stepClass(step.number), { clickable: canGoToStep(step.number) }]"
+         @click="canGoToStep(step.number) && goToStep(step.number)"
+         :style="{ cursor: canGoToStep(step.number) ? 'pointer' : 'default' }">
       <div class="step-circle">
-        <template v-if="step.number < currentStep">✓</template>
+        <template v-if="stepClass(step.number) === 'completed'">✓</template>
         <template v-else>{{ step.number }}</template>
       </div>
       <div class="step-label">{{ step.title }}</div>
@@ -135,6 +137,15 @@
         <button @click="confirmStoryboard" :disabled="loading" class="btn-primary">
           确认分镜，下一步 →
         </button>
+        <button v-if="canGoToStep(3) && project?.first_frame_url" @click="goToStep(3)" class="btn-secondary">
+          首帧 →
+        </button>
+        <button v-if="canGoToStep(4) && (project?.generated_frames || []).length > 0" @click="goToStep(4)" class="btn-secondary">
+          动画帧 →
+        </button>
+        <button v-if="canGoToStep(5) && project?.video_url" @click="goToStep(5)" class="btn-secondary">
+          视频 →
+        </button>
       </div>
     </div>
 
@@ -156,7 +167,7 @@
           </div>
           <button @click="generateFirstFrame" :disabled="loading || !firstFramePrompt.trim()" class="btn-primary" style="width:100%">
             <span v-if="loading" class="spinner"></span>
-            {{ loading ? '生成中...' : '生成首帧图片' }}
+            {{ loading ? '生成4张候选中...' : '生成4张首帧候选' }}
           </button>
         </div>
 
@@ -178,6 +189,30 @@
         </div>
       </div>
 
+      <!-- 候选图片选择 -->
+      <div v-if="(project?.first_frame_candidates || []).length > 0 && !project?.first_frame_url" class="candidates-section">
+        <h3 style="font-size:16px; margin-bottom:12px;">选择一张首帧图片</h3>
+        <div class="candidates-grid">
+          <div v-for="(url, idx) in project.first_frame_candidates" :key="idx"
+               class="candidate-card"
+               :class="{ selected: selectedCandidateIndex === idx + 1 }"
+               @click="selectedCandidateIndex = idx + 1">
+            <img :src="url + '?t=' + Date.now()" :alt="'候选 ' + (idx + 1)" />
+            <span class="candidate-label">{{ idx + 1 }}</span>
+            <span v-if="selectedCandidateIndex === idx + 1" class="candidate-check">✓</span>
+          </div>
+        </div>
+        <div class="actions" style="justify-content:center; margin-top:16px;">
+          <button @click="selectFirstFrame" :disabled="loading || selectedCandidateIndex == null" class="btn-primary">
+            <span v-if="loading" class="spinner"></span>
+            {{ selectedCandidateIndex ? '使用第 ' + selectedCandidateIndex + ' 张' : '请先点击选择一张图片' }}
+          </button>
+          <button @click="generateFirstFrame" :disabled="loading || !firstFramePrompt.trim()" class="btn-secondary">
+            🔄 重新生成4张
+          </button>
+        </div>
+      </div>
+
       <!-- 首帧预览 -->
       <div v-if="project?.first_frame_url" class="first-frame-preview">
         <h3>✅ 首帧预览</h3>
@@ -191,6 +226,12 @@
 
       <div class="actions" style="margin-top:16px">
         <button @click="goToStep(2)" class="btn-secondary">← 返回修改分镜</button>
+        <button v-if="canGoToStep(4) && (project?.generated_frames || []).length > 0" @click="goToStep(4)" class="btn-secondary">
+          动画帧 →
+        </button>
+        <button v-if="canGoToStep(5) && project?.video_url" @click="goToStep(5)" class="btn-secondary">
+          视频 →
+        </button>
       </div>
     </div>
 
@@ -198,17 +239,47 @@
     <div v-show="currentStep === 4" class="step-content">
       <h2>⚡ 生成动画帧</h2>
       <p class="step-desc">
-        系统将使用图片编辑 AI 逐帧生成动画，每一帧基于上一帧进行微调，确保画面连贯。
+        选择生成模式，然后开始生成动画帧。
       </p>
 
       <!-- 开始前 -->
       <div v-if="project?.status !== 'generating_frames' && project?.status !== 'frames_ready' && !polling">
+
+        <!-- 模式选择 -->
+        <div class="mode-selector">
+          <label class="mode-option" :class="{ active: generationMode === 'sequential' }">
+            <input type="radio" v-model="generationMode" value="sequential" />
+            <div class="mode-option-content">
+              <strong>🔗 链式生成</strong>
+              <p>每帧基于上一帧微调，画面连贯过渡，适合需要平滑动作的场景</p>
+            </div>
+          </label>
+          <label class="mode-option" :class="{ active: generationMode === 'parallel' }">
+            <input type="radio" v-model="generationMode" value="parallel" />
+            <div class="mode-option-content">
+              <strong>⚡ 并行生成</strong>
+              <p>所有帧基于首帧独立生成，速度更快，适合动作幅度大的场景</p>
+            </div>
+          </label>
+        </div>
+
         <div class="warning-box">
           ⚠️ 即将生成 {{ project?.frame_count || 0 }} 帧动画。
-          每帧需要调用一次 AI 图片编辑 API，预计耗时
-          {{ Math.ceil((project?.frame_count || 0) * 10 / 60) }}-{{ Math.ceil((project?.frame_count || 0) * 15 / 60) }} 分钟。
+          {{ generationMode === 'parallel' ? '并行模式下多帧同时生成，速度更快。' : '链式模式下逐帧生成，每帧基于上一帧。' }}
         </div>
-        <div class="actions">
+        <div v-if="project?.status === 'generation_stopped' || (project?.status === 'failed' && (project?.generated_frames || []).length > 0)" class="warning-box" style="margin-top:12px; color:var(--warning)">
+          {{ project?.generation_message || '当前任务保留了部分已生成帧，可继续生成。' }}
+        </div>
+        <div class="actions" v-if="(project?.status === 'generation_stopped' || project?.status === 'failed') && (project?.generated_frames || []).length > 0">
+          <button @click="continueGeneration" :disabled="loading" class="btn-primary">
+            ▶️ 继续生成
+          </button>
+          <button @click="startGeneration" :disabled="loading" class="btn-secondary">
+            🔄 重新生成全部帧
+          </button>
+          <button @click="goToStep(3)" class="btn-secondary">← 返回修改首帧</button>
+        </div>
+        <div class="actions" v-else>
           <button @click="startGeneration" :disabled="loading" class="btn-primary">
             🚀 开始生成
           </button>
@@ -227,23 +298,52 @@
             {{ project?.generation_message || '准备中...' }}
             ({{ project?.generation_current || 0 }} / {{ project?.generation_total || 0 }})
           </p>
+          <p v-if="frameStatusSummary" class="progress-subtext">
+            {{ frameStatusSummary }}
+          </p>
+          <div class="actions" style="margin-top:12px; justify-content:center;">
+            <button
+              @click="stopGeneration"
+              class="btn-secondary"
+              :disabled="project?.stop_generation_requested"
+            >
+              {{ project?.stop_generation_requested ? '停止请求已发送...' : '⏹ 停止生成' }}
+            </button>
+          </div>
         </div>
       </div>
 
       <!-- 帧缩略图 -->
-      <div v-if="(project?.generated_frames || []).length > 0">
-        <h3 style="font-size:15px; margin-bottom:10px;">已生成的帧</h3>
-        <div class="frames-gallery">
-          <div v-for="(url, idx) in project.generated_frames" :key="idx" class="frame-thumb">
-            <img :src="url + '?t=' + Date.now()" :alt="'帧 ' + (idx + 1)" />
-            <span class="frame-thumb-label">{{ idx + 1 }}</span>
+      <div v-if="frameSlots.length > 0">
+        <div class="frames-summary">
+          <h3 style="font-size:15px;">帧生成状态</h3>
+          <span>{{ doneFrameCount }} / {{ frameSlots.length }} 已完成</span>
+        </div>
+        <div class="frame-legend">
+          <span class="frame-legend-item"><i class="legend-dot is-done"></i>已完成</span>
+          <span class="frame-legend-item"><i class="legend-dot is-running"></i>生成中</span>
+          <span class="frame-legend-item"><i class="legend-dot is-pending"></i>排队中</span>
+          <span v-if="project?.status === 'generation_stopped'" class="frame-legend-item"><i class="legend-dot is-paused"></i>已暂停</span>
+          <span v-if="project?.status === 'failed'" class="frame-legend-item"><i class="legend-dot is-failed"></i>失败</span>
+        </div>
+        <div class="frames-gallery frames-gallery-status">
+          <div v-for="slot in frameSlots" :key="slot.index" class="frame-thumb" :class="'is-' + slot.status">
+            <img v-if="slot.url" :src="frameThumbSrc(slot)" :alt="'帧 ' + slot.index" />
+            <div v-else class="frame-thumb-placeholder">
+              <span>{{ slot.statusLabel }}</span>
+            </div>
+            <span class="frame-thumb-status">{{ slot.statusLabel }}</span>
+            <span class="frame-thumb-label">帧 {{ slot.index }}</span>
           </div>
         </div>
       </div>
 
       <!-- 完成后 -->
-      <div v-if="project?.status === 'frames_ready'" class="actions" style="margin-top:20px">
-        <button @click="goToStep(5); renderVideo()" class="btn-primary">
+      <div v-if="project?.status === 'frames_ready' || project?.status === 'rendering' || project?.status === 'completed'" class="actions" style="margin-top:20px">
+        <button v-if="project?.status === 'completed'" @click="goToStep(5)" class="btn-primary">
+          🎥 查看视频 →
+        </button>
+        <button v-else @click="goToStep(5); renderVideo()" class="btn-primary">
           🎥 渲染视频 →
         </button>
         <button @click="startGeneration" class="btn-secondary">🔄 重新生成所有帧</button>
@@ -277,7 +377,9 @@
           <a :href="project.video_url" download class="btn-primary">
             📥 下载视频
           </a>
-          <button @click="goToStep(4)" class="btn-secondary">← 返回查看帧</button>
+          <button @click="goToStep(4)" class="btn-secondary">← 查看动画帧</button>
+          <button @click="goToStep(3)" class="btn-secondary">← 查看首帧</button>
+          <button @click="goToStep(2)" class="btn-secondary">← 查看分镜</button>
           <button @click="startOver" class="btn-secondary">🆕 创建新动画</button>
         </div>
       </div>
